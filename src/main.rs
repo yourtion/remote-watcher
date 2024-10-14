@@ -1,12 +1,10 @@
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{recommended_watcher, RecursiveMode, Watcher};
 use std::path::Path;
 
 fn watch<P: AsRef<Path>>(path: P) -> notify::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel();
 
-    // Automatically select the best implementation for your platform.
-    // You can also access each implementation directly e.g. INotifyWatcher.
-    let mut watcher = RecommendedWatcher::new(tx)?;
+    let mut watcher = recommended_watcher(tx)?;
 
     // Add a path to be watched. All files and directories at that path and
     // below will be monitored for changes.
