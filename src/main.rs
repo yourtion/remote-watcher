@@ -1,92 +1,93 @@
+mod websocket;
+
+use crate::websocket::{FileChange, start_ws_server, start_ws_client};
 use notify::{recommended_watcher, RecursiveMode, Watcher, Event};
 use std::path::Path;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use tokio::net::TcpStream;
-use tokio_tungstenite::{connect_async, WebSocketStream};
-use futures::prelude::*;
-use serde::{Serialize, Deserialize};
+use tokio::sync::broadcast;
 
-// 定义要传输的消息结构
-#[derive(Serialize, Deserialize)]
-struct FileChange {
-    path: String,
-    kind: String,
-    timestamp: u64,
-}
-
-// 修改 watch 函数以支持事件聚合
-async fn watch<P: AsRef<Path>>(path: P, ws_url: &str) -> notify::Result<()> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let mut watcher = recommended_watcher(tx)?;
+async fn watch<P: AsRef<Path>>(
+    path: P,
+    tx: broadcast::Sender<FileChange>
+) -> notify::Result<()> {
+    let (notify_tx, notify_rx) = std::sync::mpsc::channel();
+    let mut watcher = recommended_watcher(notify_tx)?;
     
-    // 事件聚合缓存
     let mut event_cache: HashMap<String, (Event, Instant)> = HashMap::new();
     const AGGREGATION_DELAY: Duration = Duration::from_secs(2);
-
-    // 连接 WebSocket
-    let (ws_stream, _) = connect_async(ws_url).await.expect("Failed to connect");
-    let (mut write, _read) = ws_stream.split();
+    const CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
     watcher.watch(path.as_ref(), RecursiveMode::Recursive)?;
 
+    let mut last_check = Instant::now();
+
     loop {
-        if let Ok(event) = rx.try_recv() {
-            match event {
-                Ok(event) => {
-                    // 将事件添加到缓存
-                    for path in event.paths.iter() {
-                        let path_str = path.to_string_lossy().to_string();
-                        event_cache.insert(path_str, (event.clone(), Instant::now()));
-                    }
+        match notify_rx.recv_timeout(CHECK_INTERVAL) {
+            Ok(Ok(event)) => {
+                for path in event.paths.iter() {
+                    let path_str = path.to_string_lossy().to_string();
+                    println!("检测到文件变更: {}", path_str);
+                    event_cache.insert(path_str, (event.clone(), Instant::now()));
                 }
-                Err(e) => println!("watch error: {:?}", e),
+            }
+            Ok(Err(e)) => println!("监控错误: {:?}", e),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            }
+            Err(e) => {
+                println!("接收错误: {:?}", e);
+                break;
             }
         }
 
-        // 检查并发送聚合后的事件
         let now = Instant::now();
-        let mature_events: Vec<FileChange> = event_cache
-            .iter()
-            .filter(|(_, (_, timestamp))| now.duration_since(*timestamp) >= AGGREGATION_DELAY)
-            .map(|(path, (event, _))| FileChange {
-                path: path.clone(),
-                kind: format!("{:?}", event.kind),
-                timestamp: now.elapsed().as_secs(),
-            })
-            .collect();
+        if now.duration_since(last_check) >= CHECK_INTERVAL {
+            last_check = now;
 
-        // 发送成熟的事件并从缓存中移除
-        for change in mature_events {
-            let msg = serde_json::to_string(&change).unwrap();
-            write.send(msg.into()).await.expect("Failed to send message");
-            event_cache.remove(&change.path);
+            let mature_events: Vec<FileChange> = event_cache
+                .iter()
+                .filter(|(_, (_, timestamp))| now.duration_since(*timestamp) >= AGGREGATION_DELAY)
+                .map(|(path, (event, _))| FileChange {
+                    path: path.clone(),
+                    kind: format!("{:?}", event.kind),
+                    timestamp: now.elapsed().as_secs(),
+                    from_server: false,
+                })
+                .collect();
+
+            for change in mature_events {
+                println!("发送文件变更通知: {:?}", change);
+                if tx.send(change.clone()).is_err() {
+                    println!("无法发送变更通知");
+                }
+                event_cache.remove(&change.path);
+            }
         }
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
+
+    Ok(())
 }
 
-// 修改 main 函数以支持异步
 #[tokio::main]
-async fn main() {
-    let role = std::env::args()
-        .nth(1)
-        .expect("Argument 1 needs to be a server/clent");
-    let path = std::env::args()
-        .nth(2)
-        .expect("Argument 2 needs to be a path");
-    if role == "server" {
-        if !std::path::Path::new(&path).exists() {
-            println!("路径 '{}' 不存在", path);
-            return;
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 这里假设通过命令行参数获取角色和路径
+    let role = std::env::args().nth(1).unwrap_or_else(|| "client".to_string());
+    let path = std::env::args().nth(2).unwrap_or_else(|| ".".to_string());
+
+    match role.as_str() {
+        "server" => {
+            println!("启动服务器模式");
+            start_ws_server("127.0.0.1:8080").await?;
         }
-        println!("watching {}", path);
-        let ws_url = "ws://localhost:8080";
-        if let Err(e) = watch(path, ws_url).await {
-            println!("error: {:?}", e)
+        "client" => {
+            println!("启动客户端模式");
+            let tx = start_ws_client("ws://127.0.0.1:8080").await?;
+            watch(path, tx).await?;
         }
-    } else {
-        println!("client {}", path);
+        _ => {
+            println!("无效的角色，请使用 'server' 或 'client'");
+        }
     }
+
+    Ok(())
 }
