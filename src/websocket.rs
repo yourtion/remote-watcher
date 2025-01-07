@@ -8,6 +8,8 @@ use tokio_tungstenite::{
 use std::net::SocketAddr;
 use serde::{Serialize, Deserialize};
 use tokio::sync::broadcast;
+use std::path::Path;
+use std::fs;
 
 // 定义消息类型
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -15,7 +17,7 @@ pub struct FileChange {
     pub path: String,
     pub kind: String,
     pub timestamp: u64,
-    pub content_diff: Option<String>,  // 添加差异内容
+    pub content: Option<Vec<u8>>,  // 改为存储二进制内容
     #[serde(default)]
     pub from_server: bool,
 }
@@ -131,7 +133,24 @@ async fn handle_server_connection(
         match msg {
             Ok(Message::Text(text)) => {
                 if let Ok(change) = serde_json::from_str::<FileChange>(&text) {
-                    println!("服务器收到文件变更: {:?}", change);
+                    println!("服务器收到文件变更: {}", change.path);
+                    
+                    // 如果有文件内容，直接写入
+                    if let Some(content) = &change.content {
+                        let path = Path::new(&change.path);
+                        if let Some(parent) = path.parent() {
+                            if let Err(e) = fs::create_dir_all(parent) {
+                                println!("创建目录失败: {}", e);
+                                continue;
+                            }
+                        }
+                        
+                        if let Err(e) = fs::write(path, content) {
+                            println!("写入文件失败: {}", e);
+                            continue;
+                        }
+                    }
+
                     // 广播给其他客户端
                     if broadcast_tx.send(change).is_err() {
                         println!("无法广播消息");

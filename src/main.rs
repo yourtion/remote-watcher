@@ -1,6 +1,5 @@
 mod websocket;
 mod watcher;
-mod diff;
 
 use crate::websocket::{start_ws_server, start_ws_client};
 use crate::watcher::start_file_watcher;
