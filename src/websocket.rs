@@ -15,7 +15,8 @@ pub struct FileChange {
     pub path: String,
     pub kind: String,
     pub timestamp: u64,
-    #[serde(default)]  // 添加来源标记
+    pub content_diff: Option<String>,  // 添加差异内容
+    #[serde(default)]
     pub from_server: bool,
 }
 

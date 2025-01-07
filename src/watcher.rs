@@ -3,7 +3,9 @@ use std::path::Path;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
+use std::fs;
 use crate::websocket::FileChange;
+use crate::diff::calculate_diff;
 
 pub async fn start_file_watcher<P: AsRef<Path>>(
     path: P,
@@ -13,6 +15,7 @@ pub async fn start_file_watcher<P: AsRef<Path>>(
     let mut watcher = recommended_watcher(notify_tx)?;
     
     let mut event_cache: HashMap<String, (Event, Instant)> = HashMap::new();
+    let mut content_cache: HashMap<String, String> = HashMap::new();
     const AGGREGATION_DELAY: Duration = Duration::from_secs(2);
     const CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -44,11 +47,35 @@ pub async fn start_file_watcher<P: AsRef<Path>>(
             let mature_events: Vec<FileChange> = event_cache
                 .iter()
                 .filter(|(_, (_, timestamp))| now.duration_since(*timestamp) >= AGGREGATION_DELAY)
-                .map(|(path, (event, _))| FileChange {
-                    path: path.clone(),
-                    kind: format!("{:?}", event.kind),
-                    timestamp: now.elapsed().as_secs(),
-                    from_server: false,
+                .filter_map(|(path, (event, _))| {
+                    let path = Path::new(path);
+                    
+                    // 计算文件差异
+                    let content_diff = match calculate_diff(
+                        path,
+                        content_cache.get(path.to_string_lossy().as_ref())
+                            .map(String::as_str)
+                    ) {
+                        Ok(diff) => {
+                            // 更新缓存
+                            if let Ok(new_content) = fs::read_to_string(path) {
+                                content_cache.insert(path.to_string_lossy().to_string(), new_content);
+                            }
+                            Some(diff)
+                        }
+                        Err(e) => {
+                            println!("计算差异失败: {}", e);
+                            None
+                        }
+                    };
+
+                    Some(FileChange {
+                        path: path.to_string_lossy().to_string(),
+                        kind: format!("{:?}", event.kind),
+                        timestamp: now.elapsed().as_secs(),
+                        content_diff,
+                        from_server: false,
+                    })
                 })
                 .collect();
 
