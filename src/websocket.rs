@@ -6,9 +6,9 @@ use tokio_tungstenite::{
     WebSocketStream, MaybeTlsStream,
 };
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use serde::{Serialize, Deserialize};
 use tokio::sync::broadcast;
-use std::path::Path;
 use std::fs;
 
 // 定义消息类型
@@ -20,6 +20,21 @@ pub struct FileChange {
     pub content: Option<Vec<u8>>,  // 改为存储二进制内容
     #[serde(default)]
     pub from_server: bool,
+}
+
+// 添加服务器配置结构体
+pub struct ServerConfig {
+    pub addr: String,
+    pub target_dir: PathBuf,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        ServerConfig {
+            addr: "127.0.0.1:8080".to_string(),
+            target_dir: PathBuf::from("."),
+        }
+    }
 }
 
 // WebSocket 客户端
@@ -83,9 +98,10 @@ async fn handle_client_connection(
 }
 
 // WebSocket 服务器
-pub async fn start_ws_server(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let socket = TcpListener::bind(addr).await?;
-    println!("WebSocket 服务器运行在: {}", addr);
+pub async fn start_ws_server(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let socket = TcpListener::bind(&config.addr).await?;
+    println!("WebSocket 服务器运行在: {}", config.addr);
+    println!("目标目录设置为: {}", config.target_dir.display());
     
     let (broadcast_tx, _) = broadcast::channel::<FileChange>(100);
     let broadcast_tx = std::sync::Arc::new(broadcast_tx);
@@ -93,8 +109,9 @@ pub async fn start_ws_server(addr: &str) -> Result<(), Box<dyn std::error::Error
     while let Ok((stream, peer)) = socket.accept().await {
         println!("接受新的连接: {}", peer);
         let tx = broadcast_tx.clone();
+        let target_dir = config.target_dir.clone();
         tokio::spawn(async move {
-            handle_server_connection(stream, peer, tx).await;
+            handle_server_connection(stream, peer, tx, target_dir).await;
         });
     }
 
@@ -104,7 +121,8 @@ pub async fn start_ws_server(addr: &str) -> Result<(), Box<dyn std::error::Error
 async fn handle_server_connection(
     stream: TcpStream,
     peer: SocketAddr,
-    broadcast_tx: std::sync::Arc<broadcast::Sender<FileChange>>
+    broadcast_tx: std::sync::Arc<broadcast::Sender<FileChange>>,
+    target_dir: PathBuf,
 ) {
     let ws_stream = match accept_async(stream).await {
         Ok(ws_stream) => ws_stream,
@@ -117,7 +135,6 @@ async fn handle_server_connection(
     let (mut write, mut read) = ws_stream.split();
     let mut rx = broadcast_tx.subscribe();
 
-    // 转发消息到当前客户端
     let forward_task = tokio::spawn(async move {
         while let Ok(change) = rx.recv().await {
             let message = serde_json::to_string(&change).unwrap();
@@ -128,27 +145,34 @@ async fn handle_server_connection(
         }
     });
 
-    // 处理来自客户端的消息
     while let Some(msg) = read.next().await {
         match msg {
             Ok(Message::Text(text)) => {
                 if let Ok(change) = serde_json::from_str::<FileChange>(&text) {
                     println!("服务器收到文件变更: {}", change.path);
                     
-                    // 如果有文件内容，直接写入
+                    // 如果有文件内容，写入到目标目录
                     if let Some(content) = &change.content {
-                        let path = Path::new(&change.path);
-                        if let Some(parent) = path.parent() {
+                        // 保持完整的相对路径结构
+                        let source_path = Path::new(&change.path);
+                        let target_path = target_dir.join(source_path);
+                        println!("写入文件到: {}", target_path.display());
+
+                        // 确保目标目录存在
+                        if let Some(parent) = target_path.parent() {
                             if let Err(e) = fs::create_dir_all(parent) {
                                 println!("创建目录失败: {}", e);
                                 continue;
                             }
                         }
                         
-                        if let Err(e) = fs::write(path, content) {
+                        // 写入文件内容
+                        if let Err(e) = fs::write(&target_path, content) {
                             println!("写入文件失败: {}", e);
                             continue;
                         }
+
+                        println!("成功写入文件: {}", target_path.display());
                     }
 
                     // 广播给其他客户端

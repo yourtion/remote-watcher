@@ -1,5 +1,5 @@
 use notify::{recommended_watcher, RecursiveMode, Watcher, Event};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -10,6 +10,7 @@ pub async fn start_file_watcher<P: AsRef<Path>>(
     path: P,
     tx: broadcast::Sender<FileChange>
 ) -> notify::Result<()> {
+    let base_path = PathBuf::from(path.as_ref()).canonicalize()?;
     let (notify_tx, notify_rx) = std::sync::mpsc::channel();
     let mut watcher = recommended_watcher(notify_tx)?;
     
@@ -17,7 +18,7 @@ pub async fn start_file_watcher<P: AsRef<Path>>(
     const AGGREGATION_DELAY: Duration = Duration::from_secs(2);
     const CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
-    watcher.watch(path.as_ref(), RecursiveMode::Recursive)?;
+    watcher.watch(&base_path, RecursiveMode::Recursive)?;
 
     let mut last_check = Instant::now();
 
@@ -25,9 +26,11 @@ pub async fn start_file_watcher<P: AsRef<Path>>(
         match notify_rx.recv_timeout(CHECK_INTERVAL) {
             Ok(Ok(event)) => {
                 for path in event.paths.iter() {
-                    let path_str = path.to_string_lossy().to_string();
-                    println!("检测到文件变更: {}", path_str);
-                    event_cache.insert(path_str, (event.clone(), Instant::now()));
+                    if let Ok(relative_path) = path.strip_prefix(&base_path) {
+                        let path_str = relative_path.to_string_lossy().to_string();
+                        println!("检测到文件变更: {}", path_str);
+                        event_cache.insert(path_str, (event.clone(), Instant::now()));
+                    }
                 }
             }
             Ok(Err(e)) => println!("监控错误: {:?}", e),
@@ -45,11 +48,10 @@ pub async fn start_file_watcher<P: AsRef<Path>>(
             let mature_events: Vec<FileChange> = event_cache
                 .iter()
                 .filter(|(_, (_, timestamp))| now.duration_since(*timestamp) >= AGGREGATION_DELAY)
-                .filter_map(|(path, (event, _))| {
-                    let path = Path::new(path);
+                .filter_map(|(relative_path, (event, _))| {
+                    let full_path = base_path.join(relative_path);
                     
-                    // 读取完整文件内容
-                    let content = match fs::read(path) {
+                    let content = match fs::read(&full_path) {
                         Ok(content) => Some(content),
                         Err(e) => {
                             println!("读取文件失败: {}", e);
@@ -58,7 +60,7 @@ pub async fn start_file_watcher<P: AsRef<Path>>(
                     };
 
                     Some(FileChange {
-                        path: path.to_string_lossy().to_string(),
+                        path: relative_path.to_string(),
                         kind: format!("{:?}", event.kind),
                         timestamp: now.elapsed().as_secs(),
                         content,
