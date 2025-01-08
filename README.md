@@ -1,2 +1,66 @@
-# remote-watcher
-Watch folder on remote computer or codeveloper a project by package
+# Remote Watcher
+
+Remote Watcher 是一个用于远程文件同步的工具，可以实时监控指定目录的文件变更并同步到远程服务器。
+
+## 使用方法
+
+### 启动服务器
+
+#### 使用默认目标目录 (当前目录)
+
+```bash
+cargo run -- server
+```
+
+#### 指定目标目录
+
+```bash
+cargo run -- server /path/to/target/dir
+```
+
+#### 监控指定目录
+
+```bash
+cargo run -- client ./logs
+```
+
+#### 监控其他相对路径
+
+```bash
+cargo run -- client src/test
+```
+
+## 功能特性
+
+- 实时监控本地目录文件变更
+- 支持递归监控子目录
+- 自动同步文件变更到远程服务器
+- 支持多客户端同时连接
+- 安全的路径验证，防止访问非授权目录
+- 支持配置服务器目标目录
+
+## 安装
+
+确保你已安装 Rust 开发环境，然后克隆本仓库：
+
+## 注意事项
+
+1. 客户端监控路径必须是相对路径，且只能是当前目录的子目录
+2. 不允许监控上级目录（例如 `../logs`）
+3. 不支持监控绝对路径
+4. 服务器默认监听 127.0.0.1:8080
+
+## 使用场景
+
+- 多人协同开发时实时同步代码
+- 远程文件备份
+- 开发环境和测试环境的文件同步
+- 日志文件实时同步
+
+## 贡献
+
+欢迎提交 Issue 和 Pull Request！
+
+## 许可证
+
+[MIT License](LICENSE)
